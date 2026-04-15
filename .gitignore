@@ -1,0 +1,36 @@
+# Archives / binaries
+*.zip
+*.pdf
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+nobel/novel_automotive/
+
+# PyInstaller build artifacts
+nobel/python_server/build/
+nobel/python_server/dist/
+
+# Flutter / Dart
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.packages
+.pub-cache/
+.pub/
+build/
+nobel/nobel_ui/build/
+nobel/nobel_ui/.dart_tool/
+nobel/nobel_ui/windows/flutter/ephemeral/
+nobel/nobel_ui/android/.gradle/
+nobel/nobel_ui/ios/Pods/
+nobel/nobel_ui/macos/Pods/
+nobel/nobel_ui/flutter_*.log
+
+# IDE
+.idea/
+*.iml
+.vscode/
