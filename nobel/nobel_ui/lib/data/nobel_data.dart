@@ -109,7 +109,12 @@ class Measurements {
 
       data[name]![date] = this;
     } else {
-      logger.e('검사 항목 수와 실제 데이터의 수가 일치하지 않음.');
+      // 길이 불일치 시 호출자가 알 수 있도록 예외 throw
+      // (이전: 로그만 남기고 빈 객체 반환 → 빈 데이터가 SQLite에 저장되는 손상 유발)
+      final msg =
+          '검사 항목 수(${checkList.length})와 수신 데이터 수(${jsonData['values']?.length})가 일치하지 않음. name=${jsonData['name']}';
+      logger.e(msg);
+      throw StateError(msg);
     }
   }
 

@@ -27,14 +27,17 @@ void main() async {
   // 🚀 Window Manager 초기화
   await windowManager.ensureInitialized();
 
-  // 🖥️ 윈도우 앱을 전체화면 + 상태창 숨김 설정
-  // 🖥️ Windows 앱을 전체화면 + 제목 표시줄 제거 설정
-  windowManager.waitUntilReadyToShow().then((_) async {
-    await windowManager.setFullScreen(true); // 전체화면 모드
-    // await windowManager.setAlwaysOnTop(true); // 항상 화면 위에 표시
-    await windowManager.setResizable(false); // 창 크기 조절 불가
-    await windowManager.setTitleBarStyle(TitleBarStyle.hidden,
-        windowButtonVisibility: false); // 제목 표시줄 제거
+  // 🖥️ 고정 크기로 실행 (세로 높이를 줄여 콘텐츠에 맞춤)
+  const windowOptions = WindowOptions(
+    size: Size(1920, 1050),
+    center: true,
+    backgroundColor: Colors.transparent,
+    skipTaskbar: false,
+    titleBarStyle: TitleBarStyle.normal,
+  );
+  await windowManager.waitUntilReadyToShow(windowOptions, () async {
+    await windowManager.show();
+    await windowManager.focus();
   });
 
   GoRouter.optionURLReflectsImperativeAPIs = true;

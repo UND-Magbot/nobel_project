@@ -1,7 +1,9 @@
 {
   "permissions": {
     "allow": [
-      "Bash(pyinstaller main.spec --noconfirm)"
+      "Bash(pyinstaller main.spec --noconfirm)",
+      "mcp__notion__notion-fetch",
+      "mcp__notion__notion-update-page"
     ]
   }
 }

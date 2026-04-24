@@ -7,6 +7,7 @@ import numpy as np
 import time
 import threading
 import struct
+import atexit
 from datetime import datetime
 import openpyxl
 import os
@@ -194,8 +195,8 @@ flutter_port = 12345
 plc_host = "192.168.0.100"
 plc_port = 502
 
-plc_host = "192.168.0.25"
-plc_port = 502
+# plc_host = "192.168.10.212"
+# plc_port = 502
 
 class Server:
     clients = []
@@ -239,12 +240,23 @@ class Server:
                 pipeline.start(config)
                 self.pipelines.append(pipeline)
 
+        # 프로세스 종료 시 RealSense 파이프라인 정리 (USB/카메라 핸들 해제)
+        atexit.register(self._shutdown_pipelines)
+
         self.data = None
         # PLC 측정 데이터 전용 큐 (데이터 손실 방지)
         self.measurement_queue = queue.Queue()
 
         self.slave = 1
         self.checked = False
+
+        # 트리거/모델 변경 추적 (측정하지 않은 데이터가 들어오는 문제 방지)
+        self.last_trigger_value = None
+        self.last_model_num = None
+        self.plc_connected_at = None
+        self.last_model_change_at = None
+        # 모델별 마지막 전송 값 (레지스터 정체 감지용)
+        self.last_sent_values_per_model = {}
 
     def read_plc_data_modbusTCP(self):
 
@@ -256,6 +268,7 @@ class Server:
 
         plc_logger.info("PLC 연결 완료 (host=%s, port=%s)", self.plc_ip, self.plc_port)
         print("PLC 연결 완료")
+        self.plc_connected_at = time.time()
 
         while True:
             try:
@@ -318,6 +331,13 @@ class Server:
                 
                 
                 print(model_num)
+
+                # 모델 변경 감지 → 쿨다운 타이머 시작 (레지스터가 새 값으로 업데이트될 시간 확보)
+                if self.last_model_num is not None and self.last_model_num != model_num:
+                    self.last_model_change_at = time.time()
+                    plc_logger.info("모델 변경 감지: %s → %s (3초 쿨다운)", self.last_model_num, model_num)
+                self.last_model_num = model_num
+
                 # 모델별 트리거 항목 설정
                 trigger = None
                 if model_num in [1, 2, 5, 6]:
@@ -326,7 +346,27 @@ class Server:
                 elif model_num in [3, 4]:
                     trigger = get_and_append(7042, "4번 검사", condition=False)
 
-                if trigger is not None and trigger != 0 and not self.checked:
+                # 트리거 가드:
+                # 1) PLC 연결 직후 5초는 warmup (이전 세션 잔여값에 의한 유령 트리거 방지)
+                # 2) 모델 변경 직후 3초 쿨다운 (다른 모델 레지스터 값 혼입 방지)
+                # 3) 이전 폴링과 동일한 트리거값이면 edge 아님 (새 측정이 아닌 잔여값)
+                now = time.time()
+                is_warmup = (self.plc_connected_at is not None
+                             and now - self.plc_connected_at < 5.0)
+                is_model_changing = (self.last_model_change_at is not None
+                                     and now - self.last_model_change_at < 3.0)
+                is_edge = (self.last_trigger_value is not None
+                           and trigger != self.last_trigger_value)
+                self.last_trigger_value = trigger
+
+                if is_warmup and trigger is not None and trigger != 0:
+                    plc_logger.debug("[warmup] 트리거 무시 (연결 후 %.1fs): trigger=%.3f",
+                                     now - self.plc_connected_at, trigger)
+                if is_model_changing and trigger is not None and trigger != 0:
+                    plc_logger.debug("[model-cooldown] 트리거 무시: trigger=%.3f", trigger)
+
+                if (trigger is not None and trigger != 0 and not self.checked
+                        and not is_warmup and not is_model_changing and is_edge):
 
                     plc_logger.info("=== 트리거 감지 === model_num=%d, trigger_value=%.3f", model_num, trigger)
                     print(" 트리거 감지됨 → 데이터 수집 시작")
@@ -465,6 +505,12 @@ class Server:
                     if has_zero:
                         zero_logger.critical("[!!! 0값 포함된 데이터 전송 예정] model=%d, name=%s, date=%s, values=%s", model_num, name, date, values)
 
+                    # 수집된 값은 그대로 전송.
+                    # 증상 3(사두→나팔 혼입)에 대한 근본 방어는 상위의
+                    # (1) warmup 5초 (2) 모델 변경 쿨다운 3초 (3) edge detection
+                    # 에서 이미 처리됨. 추가 정체/이상치 스킵은 오탐 가능성이 커서 제거.
+                    self.last_sent_values_per_model[model_num] = list(values)
+
                     measurement_data = {
                         "date": date,
                         "name": name,
@@ -551,9 +597,20 @@ class Server:
                     return limits
     
     def convert_int(self, result):
+        # PLC 에러 응답 방어 (result.registers 가 비어있는 경우)
+        if not getattr(result, "registers", None):
+            return 0
         raw_value = result.registers[0]  # 16비트 정수 값
         signed_value = raw_value if raw_value < 32768 else raw_value - 65536
         return signed_value
+
+    def _shutdown_pipelines(self):
+        """프로세스 종료 시 RealSense 파이프라인을 정리. atexit 등록용."""
+        for p in getattr(self, "pipelines", []):
+            try:
+                p.stop()
+            except Exception as e:
+                print(f"pipeline.stop 실패: {e}")
 
 
     def set_plc_data(self):
@@ -676,10 +733,16 @@ class Server:
                 # JSON 문자열을 Python 딕셔너리로 변환
                 if not received_data.strip():
                     print(f"⚠️ 수신된 데이터가 비어 있음 (addr: {addr})")
-                    self.clients.remove(conn)
-                    conn.close()
-                    os._exit(0)
-                    break
+                    try:
+                        self.clients.remove(conn)
+                    except ValueError:
+                        pass
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
+                    # 해당 클라이언트만 종료하고 서버는 유지 (다음 Flutter 재접속 대기)
+                    return
 
                 print("엑셀 데이터 수신: ", received_data)
 
@@ -712,22 +775,19 @@ class Server:
             except Exception as e:
                 print(f'read_and_create_xl client {addr}: {e}')
                 print(f'연결 종료 : {addr}')
-                
-                # data_lock.acquire()
-                # self.data = {
-                #     'error' : 0
-                # }
-                # data_lock.release()
-                
+
                 self.is_flutter_connected = False
                 self.is_plc_connecteced = False
                 try:
                     self.clients.remove(conn)
+                except ValueError:
+                    pass
+                try:
                     conn.close()
-                except:
-                    return 
-                
-                os._exit(0)
+                except Exception:
+                    pass
+                # 해당 클라이언트 처리 스레드만 종료. 서버/PLC 스레드는 계속 실행됨.
+                return
     
     def send_data(self, conn, addr):
         try:
@@ -816,6 +876,7 @@ class Server:
         while True:
             try:
                 flutter_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                flutter_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
                 flutter_socket.bind((self.flutter_host, self.flutter_port))
                 flutter_socket.listen(1)
                 print("Waiting for connection...")
@@ -827,6 +888,18 @@ class Server:
                     self.conn, addr = flutter_socket.accept()
                     print(f"Connected by {addr}")
                     self.is_flutter_connected = True
+
+                    # UI 재접속 시 이전에 쌓인 큐 비우기 (UI 꺼진 동안의 측정은 무시)
+                    cleared = 0
+                    while not self.measurement_queue.empty():
+                        try:
+                            self.measurement_queue.get_nowait()
+                            cleared += 1
+                        except queue.Empty:
+                            break
+                    if cleared > 0:
+                        plc_logger.info("UI 재접속: 이전 큐 %d건 제거", cleared)
+
                     send_thread = threading.Thread(target=self.send_data, args=(self.conn, addr))
                     send_thread.start()
                 
@@ -925,97 +998,96 @@ class Server:
             # 4. 새 파일로 저장
             if key:
                 name = map_data['type'].split('/')[0]
-                
+
 
                 new_file_path = f"C:\\nobel\\X-Bar-R\\{name}\\{map_data['month']}월_{map_data['type'].split('/')[0]}_{key}번항목.xlsx"
                 workbook.save(new_file_path)
-                
+
             workbook.close()
             print(f"파일이 성공적으로 저장되었습니다: {first_date}")
-            
-            workbook.close()    
-            
+
+            # Excel COM 초기화/해제 페어링 (누수 방지)
+            excel = None
+            com_workbook = None
             pythoncom.CoInitialize()
-            excel = win32com.client.Dispatch("Excel.Application")
-            # excel.Visible = True  # 엑셀 창 숨기기
-            workbook = excel.Workbooks.Open(os.path.abspath(new_file_path))
-            ws = workbook.Sheets('두께')
-            
-            output_list = []
-            for index in month_cell_index['output']:
-                computed_value = ws.Range(index).Value
-                output_list.append(computed_value)
-                
-                
-            chart_objects = ws.ChartObjects()
-            print(chart_objects.Count)
-            for i in range(1, chart_objects.Count + 1):
-                chart_obj = chart_objects.Item(i)
-                chart = chart_obj.Chart
-                # 임시 파일 경로 생성 (PNG 파일)
-                # 차트를 이미지 파일로 내보내기
-                if i < 3: 
-                    if i == 1:
-                        chart.Axes(2).MinimumScaleIsAuto = False
-                        chart.Axes(2).MaximumScaleIsAuto = False
-                        chart.Axes(2).MinimumScale = float(map_data['inputData'].get('xbar_yMin', 0))
-                        chart.Axes(2).MaximumScale = float(map_data['inputData'].get('xbar_yMax', 100))
-                    else :
-                        chart.Axes(2).MinimumScaleIsAuto = False
-                        chart.Axes(2).MaximumScaleIsAuto = False
-                        chart.Axes(2).MinimumScale = float(map_data['inputData'].get('r_yMin', 0))
-                        chart.Axes(2).MaximumScale = float(map_data['inputData'].get('r_yMax', 100))     
-                    
-                    excel.CalculateFullRebuild()
-                    time.sleep(0.5)                
-                    chart.Export(f"C:\\nobel\\image\\{i}.png")
-            
-            data_lock.acquire()
-            self.data = {
-                'X_bar=' : output_list[0],
-                'R_bar=' : output_list[1],
-                'Xbar UCL=' : output_list[2],
-                'Xbar CL=' : output_list[3],
-                'Xbar LCL=' : output_list[4],
-                'R UCL=' : output_list[5],
-                'R CL=' : output_list[6],
-                'sigma=' : output_list[7],
-                'Cp=' : output_list[8],
-                'Cpk=' : output_list[9],
-                '예상불량(ppm)' : output_list[10],
-                'chart' : True
-            }
-            data_lock.release()
-            
-            print('데이터 전송 완료!')
-            
-            workbook.Close(SaveChanges=False)
-            excel.Quit()
-            
+            try:
+                excel = win32com.client.Dispatch("Excel.Application")
+                # excel.Visible = True  # 엑셀 창 숨기기
+                com_workbook = excel.Workbooks.Open(os.path.abspath(new_file_path))
+                ws = com_workbook.Sheets('두께')
+
+                output_list = []
+                for index in month_cell_index['output']:
+                    computed_value = ws.Range(index).Value
+                    output_list.append(computed_value)
+
+
+                chart_objects = ws.ChartObjects()
+                print(chart_objects.Count)
+                for i in range(1, chart_objects.Count + 1):
+                    chart_obj = chart_objects.Item(i)
+                    chart = chart_obj.Chart
+                    # 임시 파일 경로 생성 (PNG 파일)
+                    # 차트를 이미지 파일로 내보내기
+                    if i < 3:
+                        if i == 1:
+                            chart.Axes(2).MinimumScaleIsAuto = False
+                            chart.Axes(2).MaximumScaleIsAuto = False
+                            chart.Axes(2).MinimumScale = float(map_data['inputData'].get('xbar_yMin', 0))
+                            chart.Axes(2).MaximumScale = float(map_data['inputData'].get('xbar_yMax', 100))
+                        else :
+                            chart.Axes(2).MinimumScaleIsAuto = False
+                            chart.Axes(2).MaximumScaleIsAuto = False
+                            chart.Axes(2).MinimumScale = float(map_data['inputData'].get('r_yMin', 0))
+                            chart.Axes(2).MaximumScale = float(map_data['inputData'].get('r_yMax', 100))
+
+                        excel.CalculateFullRebuild()
+                        time.sleep(0.5)
+                        chart.Export(f"C:\\nobel\\image\\{i}.png")
+
+                with data_lock:
+                    self.data = {
+                        'X_bar=' : output_list[0],
+                        'R_bar=' : output_list[1],
+                        'Xbar UCL=' : output_list[2],
+                        'Xbar CL=' : output_list[3],
+                        'Xbar LCL=' : output_list[4],
+                        'R UCL=' : output_list[5],
+                        'R CL=' : output_list[6],
+                        'sigma=' : output_list[7],
+                        'Cp=' : output_list[8],
+                        'Cpk=' : output_list[9],
+                        '예상불량(ppm)' : output_list[10],
+                        'chart' : True
+                    }
+
+                print('데이터 전송 완료!')
+            finally:
+                # Excel COM 자원 정리 (예외 발생해도 반드시 실행)
+                if com_workbook is not None:
+                    try:
+                        com_workbook.Close(SaveChanges=False)
+                    except Exception as e:
+                        print(f"com_workbook.Close 실패: {e}")
+                if excel is not None:
+                    try:
+                        excel.Quit()
+                    except Exception as e:
+                        print(f"excel.Quit 실패: {e}")
+                try:
+                    pythoncom.CoUninitialize()
+                except Exception as e:
+                    print(f"CoUninitialize 실패: {e}")
+
             return True
             
         except Exception as e:
             print(e)
-            try:
-                data_lock.release()
-            except:
-                pass
-            try:
-                workbook.Close(SaveChanges=False)
-            except:
-                pass
-            
-            try:
-                excel.Quit()
-            except:
-                pass
-            
             print(f"오류 발생: {traceback.format_exc()}")
-            data_lock.acquire()
-            self.data = {
-                "error":"엑셀 파일을 닫으십시오."
-            }
-            data_lock.release()
+            with data_lock:
+                self.data = {
+                    "error":"엑셀 파일을 닫으십시오."
+                }
             return False
 
     from datetime import datetime

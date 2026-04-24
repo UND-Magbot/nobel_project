@@ -34,3 +34,6 @@ nobel/nobel_ui/flutter_*.log
 .idea/
 *.iml
 .vscode/
+
+# Claude Code 작업 상태 파일
+.claude/scheduled_tasks.lock

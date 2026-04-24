@@ -153,19 +153,36 @@ class _MainPageState extends State<MainPage> with TickerProviderStateMixin {
                     });
                   }
 
-                  Measurements data;
-                  if (Measurements.data[name]!.containsKey(date)) {
-                    data = Measurements.data[name]![date]!;
-                    data.writeValue(receivedMap["values"]);
-                  } else {
-                    data = Measurements.fromServer(receivedMap);
+                  Measurements? data;
+                  try {
+                    if (Measurements.data[name]!.containsKey(date)) {
+                      final existing = Measurements.data[name]![date]!;
+                      final ok = existing.writeValue(receivedMap["values"]);
+                      if (!ok) {
+                        logger.e('writeValue 실패 → 저장 스킵. name=$name, date=$date');
+                        // 남은 버퍼 진행을 위해 아래 cleanup으로 fall-through
+                      }
+                      data = existing;
+                    } else {
+                      data = Measurements.fromServer(receivedMap);
+                    }
+                  } catch (e) {
+                    // fromServer/writeValue 에서 길이 불일치 등 → 데이터 오염 방지를 위해 저장 안 함
+                    logger.e('측정 데이터 생성 실패: $e');
+                    data = null;
                   }
 
-                  // SQLite에 저장
-                  DatabaseHelper().saveMeasurements(data);
+                  // SQLite에 저장 (실패해도 UI는 계속 동작)
+                  if (data != null) {
+                    DatabaseHelper()
+                        .saveMeasurements(data)
+                        .catchError((e, st) {
+                      logger.e('saveMeasurements 실패: $e\n$st');
+                    });
+                  }
 
-                  // UI 업데이트
-                  setState(() {
+                  // UI 업데이트 (dispose 이후 호출 방지)
+                  if (mounted) setState(() {
                     String name = receivedMap['name'];
                     int index = Constants.names.indexOf(name);
                     if (index == -1) {
@@ -201,16 +218,18 @@ class _MainPageState extends State<MainPage> with TickerProviderStateMixin {
                     ///////////////////////////////////////////////////////////////////////
                   });
                   // 🔹 탭 자동 전환 (setState() 끝난 바로 아래)
-                    String receivedName = receivedMap['name'];
-                    int tabToGo = Constants.names.indexOf(receivedName);
+                    if (mounted) {
+                      String receivedName = receivedMap['name'];
+                      int tabToGo = Constants.names.indexOf(receivedName);
 
-                    final controller = _model.tabBarController;
+                      final controller = _model.tabBarController;
 
-                    if (controller != null) {
-                        if (controller.index != tabToGo && tabToGo >= 0) {
-                            controller.animateTo(tabToGo);
-                            debugPrint("📍 탭 전환됨: $receivedName → index $tabToGo");
-                        }
+                      if (controller != null) {
+                          if (controller.index != tabToGo && tabToGo >= 0) {
+                              controller.animateTo(tabToGo);
+                              debugPrint("📍 탭 전환됨: $receivedName → index $tabToGo");
+                          }
+                      }
                     }
                 }
 
@@ -220,6 +239,7 @@ class _MainPageState extends State<MainPage> with TickerProviderStateMixin {
                 }
                 // error
                 else if (receivedMap.containsKey('error')) {
+                  if (!mounted) break;
                   showDialog(
                     context: context,
                     builder: (alertDialogContext) {
@@ -258,6 +278,7 @@ class _MainPageState extends State<MainPage> with TickerProviderStateMixin {
                   );
                   FFAppState().setIsLoading(false);
                 } else if (receivedMap.containsKey('done')) {
+                  if (!mounted) break;
                   showDialog(
                     context: context,
                     builder: (alertDialogContext) {
@@ -596,25 +617,28 @@ class _MainPageState extends State<MainPage> with TickerProviderStateMixin {
                                                           alignment:
                                                               const AlignmentDirectional(
                                                                   0.0, 0.0),
-                                                          child: Text(
-                                                            'Φ8 SUS304\nmale tube 성형',
-                                                            textAlign: TextAlign
-                                                                .center,
-                                                            style: FlutterFlowTheme
-                                                                    .of(context)
-                                                                .bodyMedium
-                                                                .override(
-                                                                  fontFamily:
-                                                                      'Inter',
-                                                                  fontSize:
-                                                                      scaleFactor *
-                                                                          23.0,
-                                                                  letterSpacing:
-                                                                      0.0,
-                                                                  fontWeight:
-                                                                      FontWeight
-                                                                          .w600,
-                                                                ),
+                                                          child: FittedBox(
+                                                            fit: BoxFit.scaleDown,
+                                                            child: Text(
+                                                              'Φ8 SUS304\nmale tube 성형',
+                                                              textAlign: TextAlign
+                                                                  .center,
+                                                              style: FlutterFlowTheme
+                                                                      .of(context)
+                                                                  .bodyMedium
+                                                                  .override(
+                                                                    fontFamily:
+                                                                        'Inter',
+                                                                    fontSize:
+                                                                        scaleFactor *
+                                                                            23.0,
+                                                                    letterSpacing:
+                                                                        0.0,
+                                                                    fontWeight:
+                                                                        FontWeight
+                                                                            .w600,
+                                                                  ),
+                                                            ),
                                                           ),
                                                         ),
                                                       ),
@@ -701,7 +725,7 @@ class _MainPageState extends State<MainPage> with TickerProviderStateMixin {
                                                               width: 200.0,
                                                               height: 200.0,
                                                               fit: BoxFit
-                                                                  .fitHeight,
+                                                                  .contain,
                                                             ),
                                                           ),
                                                         ),
@@ -1270,20 +1294,24 @@ class _MainPageState extends State<MainPage> with TickerProviderStateMixin {
                                                                     scaleFactor,
                                                                 12.0 *
                                                                     scaleFactor),
-                                                    child: Text(
-                                                      '1. 이상 발생시 즉시 QA에 통보\n2. 자주검사 기준서 필히 숙지 할 것.\n3. 검사주기가 전수 검사인 제품은 불량내용 및 수량만 체크할 것.\n(양호 :O  불량발생:X  치수:치수기입)',
-                                                      style: FlutterFlowTheme
-                                                              .of(context)
-                                                          .bodyMedium
-                                                          .override(
-                                                            fontFamily: 'Inter',
-                                                            fontSize:
-                                                                scaleFactor *
-                                                                    23.0,
-                                                            letterSpacing: 0.0,
-                                                            fontWeight:
-                                                                FontWeight.w600,
-                                                          ),
+                                                    child: FittedBox(
+                                                      fit: BoxFit.scaleDown,
+                                                      alignment: Alignment.topLeft,
+                                                      child: Text(
+                                                        '1. 이상 발생시 즉시 QA에 통보\n2. 자주검사 기준서 필히 숙지 할 것.\n3. 검사주기가 전수 검사인 제품은 불량내용 및 수량만 체크할 것.\n(양호 :O  불량발생:X  치수:치수기입)',
+                                                        style: FlutterFlowTheme
+                                                                .of(context)
+                                                            .bodyMedium
+                                                            .override(
+                                                              fontFamily: 'Inter',
+                                                              fontSize:
+                                                                  scaleFactor *
+                                                                      23.0,
+                                                              letterSpacing: 0.0,
+                                                              fontWeight:
+                                                                  FontWeight.w600,
+                                                            ),
+                                                      ),
                                                     ),
                                                   ),
                                                 ),
@@ -3763,25 +3791,28 @@ class _MainPageState extends State<MainPage> with TickerProviderStateMixin {
                                                           alignment:
                                                               const AlignmentDirectional(
                                                                   0.0, 0.0),
-                                                          child: Text(
-                                                            'Ø12 SUS304\nmale tube 성형',
-                                                            textAlign: TextAlign
-                                                                .center,
-                                                            style: FlutterFlowTheme
-                                                                    .of(context)
-                                                                .bodyMedium
-                                                                .override(
-                                                                  fontFamily:
-                                                                      'Inter',
-                                                                  fontSize:
-                                                                      scaleFactor *
-                                                                          23.0,
-                                                                  letterSpacing:
-                                                                      0.0,
-                                                                  fontWeight:
-                                                                      FontWeight
-                                                                          .w600,
-                                                                ),
+                                                          child: FittedBox(
+                                                            fit: BoxFit.scaleDown,
+                                                            child: Text(
+                                                              'Ø12 SUS304\nmale tube 성형',
+                                                              textAlign: TextAlign
+                                                                  .center,
+                                                              style: FlutterFlowTheme
+                                                                      .of(context)
+                                                                  .bodyMedium
+                                                                  .override(
+                                                                    fontFamily:
+                                                                        'Inter',
+                                                                    fontSize:
+                                                                        scaleFactor *
+                                                                            23.0,
+                                                                    letterSpacing:
+                                                                        0.0,
+                                                                    fontWeight:
+                                                                        FontWeight
+                                                                            .w600,
+                                                                  ),
+                                                            ),
                                                           ),
                                                         ),
                                                       ),
@@ -3868,7 +3899,7 @@ class _MainPageState extends State<MainPage> with TickerProviderStateMixin {
                                                               width: 200.0,
                                                               height: 200.0,
                                                               fit: BoxFit
-                                                                  .fitHeight,
+                                                                  .contain,
                                                             ),
                                                           ),
                                                         ),
@@ -4445,20 +4476,24 @@ class _MainPageState extends State<MainPage> with TickerProviderStateMixin {
                                                                     scaleFactor,
                                                                 12.0 *
                                                                     scaleFactor),
-                                                    child: Text(
-                                                      '1. 이상 발생시 즉시 QA에 통보\n2. 자주검사 기준서 필히 숙지 할 것.\n3. 검사주기가 전수 검사인 제품은 불량내용 및 수량만 체크할 것.\n(양호 :O  불량발생:X  치수:치수기입)',
-                                                      style: FlutterFlowTheme
-                                                              .of(context)
-                                                          .bodyMedium
-                                                          .override(
-                                                            fontFamily: 'Inter',
-                                                            fontSize:
-                                                                scaleFactor *
-                                                                    23.0,
-                                                            letterSpacing: 0.0,
-                                                            fontWeight:
-                                                                FontWeight.w600,
-                                                          ),
+                                                    child: FittedBox(
+                                                      fit: BoxFit.scaleDown,
+                                                      alignment: Alignment.topLeft,
+                                                      child: Text(
+                                                        '1. 이상 발생시 즉시 QA에 통보\n2. 자주검사 기준서 필히 숙지 할 것.\n3. 검사주기가 전수 검사인 제품은 불량내용 및 수량만 체크할 것.\n(양호 :O  불량발생:X  치수:치수기입)',
+                                                        style: FlutterFlowTheme
+                                                                .of(context)
+                                                            .bodyMedium
+                                                            .override(
+                                                              fontFamily: 'Inter',
+                                                              fontSize:
+                                                                  scaleFactor *
+                                                                      23.0,
+                                                              letterSpacing: 0.0,
+                                                              fontWeight:
+                                                                  FontWeight.w600,
+                                                            ),
+                                                      ),
                                                     ),
                                                   ),
                                                 ),
@@ -7016,25 +7051,28 @@ class _MainPageState extends State<MainPage> with TickerProviderStateMixin {
                                                           alignment:
                                                               const AlignmentDirectional(
                                                                   0.0, 0.0),
-                                                          child: Text(
-                                                            'Φ8 SUS304 tube\n이중축관성형',
-                                                            textAlign: TextAlign
-                                                                .center,
-                                                            style: FlutterFlowTheme
-                                                                    .of(context)
-                                                                .bodyMedium
-                                                                .override(
-                                                                  fontFamily:
-                                                                      'Inter',
-                                                                  fontSize:
-                                                                      scaleFactor *
-                                                                          23.0,
-                                                                  letterSpacing:
-                                                                      0.0,
-                                                                  fontWeight:
-                                                                      FontWeight
-                                                                          .w600,
-                                                                ),
+                                                          child: FittedBox(
+                                                            fit: BoxFit.scaleDown,
+                                                            child: Text(
+                                                              'Φ8 SUS304 tube\n이중축관성형',
+                                                              textAlign: TextAlign
+                                                                  .center,
+                                                              style: FlutterFlowTheme
+                                                                      .of(context)
+                                                                  .bodyMedium
+                                                                  .override(
+                                                                    fontFamily:
+                                                                        'Inter',
+                                                                    fontSize:
+                                                                        scaleFactor *
+                                                                            23.0,
+                                                                    letterSpacing:
+                                                                        0.0,
+                                                                    fontWeight:
+                                                                        FontWeight
+                                                                            .w600,
+                                                                  ),
+                                                            ),
                                                           ),
                                                         ),
                                                       ),
@@ -7121,7 +7159,7 @@ class _MainPageState extends State<MainPage> with TickerProviderStateMixin {
                                                               width: 200.0,
                                                               height: 200.0,
                                                               fit: BoxFit
-                                                                  .fitHeight,
+                                                                  .contain,
                                                             ),
                                                           ),
                                                         ),
@@ -7698,20 +7736,24 @@ class _MainPageState extends State<MainPage> with TickerProviderStateMixin {
                                                                     scaleFactor,
                                                                 12.0 *
                                                                     scaleFactor),
-                                                    child: Text(
-                                                      '1. 이상 발생시 즉시 QA에 통보\n2. 자주검사 기준서 필히 숙지 할 것.\n3. 검사주기가 전수 검사인 제품은 불량내용 및 수량만 체크할 것.\n(양호 :O  불량발생:X  치수:치수기입)',
-                                                      style: FlutterFlowTheme
-                                                              .of(context)
-                                                          .bodyMedium
-                                                          .override(
-                                                            fontFamily: 'Inter',
-                                                            fontSize:
-                                                                scaleFactor *
-                                                                    23.0,
-                                                            letterSpacing: 0.0,
-                                                            fontWeight:
-                                                                FontWeight.w600,
-                                                          ),
+                                                    child: FittedBox(
+                                                      fit: BoxFit.scaleDown,
+                                                      alignment: Alignment.topLeft,
+                                                      child: Text(
+                                                        '1. 이상 발생시 즉시 QA에 통보\n2. 자주검사 기준서 필히 숙지 할 것.\n3. 검사주기가 전수 검사인 제품은 불량내용 및 수량만 체크할 것.\n(양호 :O  불량발생:X  치수:치수기입)',
+                                                        style: FlutterFlowTheme
+                                                                .of(context)
+                                                            .bodyMedium
+                                                            .override(
+                                                              fontFamily: 'Inter',
+                                                              fontSize:
+                                                                  scaleFactor *
+                                                                      23.0,
+                                                              letterSpacing: 0.0,
+                                                              fontWeight:
+                                                                  FontWeight.w600,
+                                                            ),
+                                                      ),
                                                     ),
                                                   ),
                                                 ),
@@ -10031,25 +10073,28 @@ class _MainPageState extends State<MainPage> with TickerProviderStateMixin {
                                                           alignment:
                                                               const AlignmentDirectional(
                                                                   0.0, 0.0),
-                                                          child: Text(
-                                                            'Φ8 SUS304 tube\n이중축관성형',
-                                                            textAlign: TextAlign
-                                                                .center,
-                                                            style: FlutterFlowTheme
-                                                                    .of(context)
-                                                                .bodyMedium
-                                                                .override(
-                                                                  fontFamily:
-                                                                      'Inter',
-                                                                  fontSize:
-                                                                      scaleFactor *
-                                                                          23.0,
-                                                                  letterSpacing:
-                                                                      0.0,
-                                                                  fontWeight:
-                                                                      FontWeight
-                                                                          .w600,
-                                                                ),
+                                                          child: FittedBox(
+                                                            fit: BoxFit.scaleDown,
+                                                            child: Text(
+                                                              'Φ8 SUS304 tube\n이중축관성형',
+                                                              textAlign: TextAlign
+                                                                  .center,
+                                                              style: FlutterFlowTheme
+                                                                      .of(context)
+                                                                  .bodyMedium
+                                                                  .override(
+                                                                    fontFamily:
+                                                                        'Inter',
+                                                                    fontSize:
+                                                                        scaleFactor *
+                                                                            23.0,
+                                                                    letterSpacing:
+                                                                        0.0,
+                                                                    fontWeight:
+                                                                        FontWeight
+                                                                            .w600,
+                                                                  ),
+                                                            ),
                                                           ),
                                                         ),
                                                       ),
@@ -10136,7 +10181,7 @@ class _MainPageState extends State<MainPage> with TickerProviderStateMixin {
                                                               width: 200.0,
                                                               height: 200.0,
                                                               fit: BoxFit
-                                                                  .fitHeight,
+                                                                  .contain,
                                                             ),
                                                           ),
                                                         ),
@@ -10710,20 +10755,24 @@ class _MainPageState extends State<MainPage> with TickerProviderStateMixin {
                                                                     scaleFactor,
                                                                 12.0 *
                                                                     scaleFactor),
-                                                    child: Text(
-                                                      '1. 이상 발생시 즉시 QA에 통보\n2. 자주검사 기준서 필히 숙지 할 것.\n3. 검사주기가 전수 검사인 제품은 불량내용 및 수량만 체크할 것.\n(양호 :O  불량발생:X  치수:치수기입)',
-                                                      style: FlutterFlowTheme
-                                                              .of(context)
-                                                          .bodyMedium
-                                                          .override(
-                                                            fontFamily: 'Inter',
-                                                            fontSize:
-                                                                scaleFactor *
-                                                                    23.0,
-                                                            letterSpacing: 0.0,
-                                                            fontWeight:
-                                                                FontWeight.w600,
-                                                          ),
+                                                    child: FittedBox(
+                                                      fit: BoxFit.scaleDown,
+                                                      alignment: Alignment.topLeft,
+                                                      child: Text(
+                                                        '1. 이상 발생시 즉시 QA에 통보\n2. 자주검사 기준서 필히 숙지 할 것.\n3. 검사주기가 전수 검사인 제품은 불량내용 및 수량만 체크할 것.\n(양호 :O  불량발생:X  치수:치수기입)',
+                                                        style: FlutterFlowTheme
+                                                                .of(context)
+                                                            .bodyMedium
+                                                            .override(
+                                                              fontFamily: 'Inter',
+                                                              fontSize:
+                                                                  scaleFactor *
+                                                                      23.0,
+                                                              letterSpacing: 0.0,
+                                                              fontWeight:
+                                                                  FontWeight.w600,
+                                                            ),
+                                                      ),
                                                     ),
                                                   ),
                                                 ),
@@ -13760,25 +13809,29 @@ class _MainPageState extends State<MainPage> with TickerProviderStateMixin {
                                                                     scaleFactor,
                                                                 0.0 *
                                                                     scaleFactor),
-                                                        child: Text(
-                                                          '1. 이상 발생시 즉시 품질에 통보\n2. 자주검사 기준서 필히 숙지할것\n(양호 :O  불량발생:X  치수:치수기입)',
-                                                          textAlign:
-                                                              TextAlign.center,
-                                                          style: FlutterFlowTheme
-                                                                  .of(context)
-                                                              .bodyMedium
-                                                              .override(
-                                                                fontFamily:
-                                                                    'Inter',
-                                                                fontSize:
-                                                                    scaleFactor *
-                                                                        20.0,
-                                                                letterSpacing:
-                                                                    0.0,
-                                                                fontWeight:
-                                                                    FontWeight
-                                                                        .w600,
-                                                              ),
+                                                        child: FittedBox(
+                                                          fit: BoxFit.scaleDown,
+                                                          alignment: Alignment.topCenter,
+                                                          child: Text(
+                                                            '1. 이상 발생시 즉시 품질에 통보\n2. 자주검사 기준서 필히 숙지할것\n(양호 :O  불량발생:X  치수:치수기입)',
+                                                            textAlign:
+                                                                TextAlign.center,
+                                                            style: FlutterFlowTheme
+                                                                    .of(context)
+                                                                .bodyMedium
+                                                                .override(
+                                                                  fontFamily:
+                                                                      'Inter',
+                                                                  fontSize:
+                                                                      scaleFactor *
+                                                                          20.0,
+                                                                  letterSpacing:
+                                                                      0.0,
+                                                                  fontWeight:
+                                                                      FontWeight
+                                                                          .w600,
+                                                                ),
+                                                          ),
                                                         ),
                                                       ),
                                                     ),
@@ -17192,25 +17245,29 @@ class _MainPageState extends State<MainPage> with TickerProviderStateMixin {
                                                                     scaleFactor,
                                                                 0.0 *
                                                                     scaleFactor),
-                                                        child: Text(
-                                                          '1. 이상 발생시 즉시 품질에 통보\n2. 자주검사 기준서 필히 숙지할것\n(양호 :O  불량발생:X  치수:치수기입)',
-                                                          textAlign:
-                                                              TextAlign.center,
-                                                          style: FlutterFlowTheme
-                                                                  .of(context)
-                                                              .bodyMedium
-                                                              .override(
-                                                                fontFamily:
-                                                                    'Inter',
-                                                                fontSize:
-                                                                    scaleFactor *
-                                                                        20.0,
-                                                                letterSpacing:
-                                                                    0.0,
-                                                                fontWeight:
-                                                                    FontWeight
-                                                                        .w600,
-                                                              ),
+                                                        child: FittedBox(
+                                                          fit: BoxFit.scaleDown,
+                                                          alignment: Alignment.topCenter,
+                                                          child: Text(
+                                                            '1. 이상 발생시 즉시 품질에 통보\n2. 자주검사 기준서 필히 숙지할것\n(양호 :O  불량발생:X  치수:치수기입)',
+                                                            textAlign:
+                                                                TextAlign.center,
+                                                            style: FlutterFlowTheme
+                                                                    .of(context)
+                                                                .bodyMedium
+                                                                .override(
+                                                                  fontFamily:
+                                                                      'Inter',
+                                                                  fontSize:
+                                                                      scaleFactor *
+                                                                          20.0,
+                                                                  letterSpacing:
+                                                                      0.0,
+                                                                  fontWeight:
+                                                                      FontWeight
+                                                                          .w600,
+                                                                ),
+                                                          ),
                                                         ),
                                                       ),
                                                     ),

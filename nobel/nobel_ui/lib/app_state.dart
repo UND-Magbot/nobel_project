@@ -99,11 +99,28 @@ class FFAppState extends ChangeNotifier {
   bool get isLoading => _isLoading;
 
   Socket? socket;
+  // 사용자가 명시적으로 다른 날짜로 이동하지 않은 한, getter 는 항상 현재 시스템 날짜를 반환.
+  // 앱을 자정 너머까지 켜둬도 새 측정이 전날 row 에 저장되는 문제를 방지.
   String _CurrentDate = DateFormat('yyyy-MM-dd').format(DateTime.now());
-  String get CurrentDate => _CurrentDate;
+  bool _userOverrodeDate = false;
+  String get CurrentDate {
+    if (!_userOverrodeDate) {
+      _CurrentDate = DateFormat('yyyy-MM-dd').format(DateTime.now());
+    }
+    return _CurrentDate;
+  }
 
   set CurrentDate(String value) {
     _CurrentDate = value;
+    _userOverrodeDate = true;
+    notifyListeners();
+  }
+
+  /// 사용자가 날짜 네비게이션을 리셋(오늘로 복귀)할 때 호출.
+  /// 호출 후에는 getter 가 다시 시스템 날짜를 자동 반영.
+  void resetCurrentDateToToday() {
+    _userOverrodeDate = false;
+    _CurrentDate = DateFormat('yyyy-MM-dd').format(DateTime.now());
     notifyListeners();
   }
 
